@@ -25,7 +25,15 @@ ext_modules = cythonize(
     },
 )
 
-rust_extensions = [RustExtension("river.stats._rust_stats", binding=Binding.PyO3)]
+rust_extensions = [
+    RustExtension("river.stats._rust_stats", binding=Binding.PyO3),
+    RustExtension(
+        "river.decomposition._rust_decomp",
+        path="rust_decomp/Cargo.toml",
+        binding=Binding.PyO3,
+        debug=False,
+    ),
+]
 
 
 class BuildFailed(Exception):
