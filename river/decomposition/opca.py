@@ -39,10 +39,49 @@ class OnlinePCA(Transformer):
         S_hat: R-dimensional subspace with orthonormal basis (n_features_in_, n_components)
 
     Examples:
+        **Parameter validation:**
+
+        >>> OnlinePCA(lambda_=-1)
+        Traceback (most recent call last):
+            ...
+        ValueError: lambda_ must be >= 0
+        >>> OnlinePCA(sigma=-1)
+        Traceback (most recent call last):
+            ...
+        ValueError: sigma must be >= 0
+        >>> OnlinePCA(tau=-1)
+        Traceback (most recent call last):
+            ...
+        ValueError: tau must be >= 0
+
+        **Transform before learning returns zeros:**
+
+        >>> pca = OnlinePCA(n_components=2)
+        >>> pca.transform_one({"a": 1.0, "b": 2.0, "c": 3.0})
+        {'a': ...0.0..., 'b': ...0.0..., 'c': ...0.0...}
+
+        **Auto-detect n_components from first sample (n_components=0):**
+
+        >>> np.random.seed(42)
+        >>> pca = OnlinePCA(n_components=0, seed=42)
+        >>> pca.learn_one({"a": 1.0, "b": 2.0, "c": 3.0})
+        >>> pca.n_components
+        3
+
+        **Feature mismatch raises an error:**
+
+        >>> np.random.seed(42)
+        >>> pca = OnlinePCA(n_components=2, seed=42)
+        >>> pca.learn_one({"a": 1.0, "b": 2.0, "c": 3.0})
+        >>> pca.learn_one({"a": 1.0, "d": 2.0})
+        Traceback (most recent call last):
+            ...
+        ValueError: Input features do not match the features seen during training.
+
+        **Basic usage with default b (b == n_components):**
+
         >>> import pandas as pd
         >>> np.random.seed(0)
-        >>> m = 20
-        >>> n = 80
         >>> mean = [5, 10, 15]
         >>> covariance_matrix = [[1, 0.5, 0.3],
         ...                      [0.5, 1, 0.2],
@@ -56,14 +95,43 @@ class OnlinePCA(Transformer):
         >>> pca = OnlinePCA(n_components=2)
         >>> for _, x in X.iloc[:50].iterrows():
         ...     pca.learn_one(x.to_dict())
-        >>> pca.transform_one(X.iloc[-1, :].to_dict())  # doctest: +SKIP
-        {0: -17.8587, 1: -1.5643}
+        >>> result = pca.transform_one(X.iloc[-1, :].to_dict())
+        >>> len(result) == 3
+        True
 
+        **Usage with b > n_components (activates sigma ratio check):**
+
+        >>> np.random.seed(0)
+        >>> X2 = np.random.multivariate_normal(mean, covariance_matrix, num_samples)
+        >>> X2[nan_indices] = np.nan
+        >>> X2 = pd.DataFrame(X2)
         >>> pca = OnlinePCA(n_components=2, b=4)
-        >>> for _, x in X.iloc[:50].iterrows():
+        >>> for _, x in X2.iloc[:50].iterrows():
         ...     pca.learn_one(x.to_dict())
-        >>> pca.transform_one(X.iloc[-1, :].to_dict())  # doctest: +SKIP
-        {0: -17.9470, 1: -1.0941}
+        >>> result = pca.transform_one(X2.iloc[-1, :].to_dict())
+        >>> len(result) == 3
+        True
+
+        **Sigma threshold rejection: high sigma prevents S_hat updates after init:**
+
+        >>> np.random.seed(42)
+        >>> pca = OnlinePCA(n_components=2, sigma=1e10, seed=42)
+        >>> data = [{"a": float(i), "b": float(i * 2), "c": float(i * 3)} for i in range(10)]
+        >>> for x in data:
+        ...     pca.learn_one(x)
+        >>> result = pca.transform_one(data[-1])
+        >>> bool(np.allclose(list(result.values()), [9.0, 18.0, 27.0]))
+        True
+
+        **With b > n_components the sigma ratio branch is exercised:**
+
+        >>> np.random.seed(42)
+        >>> pca = OnlinePCA(n_components=1, b=3, sigma=0, tau=0, seed=42)
+        >>> data = [{"a": float(i), "b": float(i * 0.1)} for i in range(1, 13)]
+        >>> for x in data:
+        ...     pca.learn_one(x)
+        >>> pca.transform_one(data[-1])
+        {'a': ...12.0..., 'b': ...1.2...}
 
     """
 
@@ -174,19 +242,15 @@ class OnlinePCA(Transformer):
         self.n_seen += 1
 
     def transform_one(self, x: dict[Hashable, Any]) -> dict[Hashable, Any]:
-        """Transform one sample from the data.
+        r"""Reconstruct x via PCA subspace: :math:`\hat{x} = \hat{S} \hat{S}^T x`.
 
         Args:
             x: Incomplete observation of data matrix. Accepts NaNs (n_features_in_,)
         """
+        keys = list(x.keys())
         x_arr = np.array(list(x.values()))
         # If transform one is called before any learning has been done
         if not hasattr(self, "S_hat"):
-            return dict(
-                zip(
-                    range(self.n_components),
-                    np.zeros(self.n_components),
-                )
-            )
-        x_arr = x_arr @ self.S_hat
-        return dict(zip(range(self.n_components), x_arr))
+            return dict(zip(keys, np.zeros(len(keys))))
+        x_hat = self.S_hat @ (self.S_hat.T @ x_arr)
+        return dict(zip(keys, x_hat))

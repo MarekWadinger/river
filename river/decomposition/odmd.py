@@ -134,6 +134,135 @@ class OnlineDMD(MiniBatchMultiTargetRegressor, BaseTransformer):
     >>> bool(np.allclose(w_pred.T, [w1[1:11], w2[1:11]]))
     True
 
+    Error when w is out of range:
+    >>> OnlineDMD(w=0)
+    Traceback (most recent call last):
+        ...
+    ValueError: w must be in (0, 1]
+    >>> OnlineDMD(w=2)
+    Traceback (most recent call last):
+        ...
+    ValueError: w must be in (0, 1]
+
+    Error when eig_rtol is out of range:
+    >>> OnlineDMD(eig_rtol=1.5)
+    Traceback (most recent call last):
+        ...
+    ValueError: eig_rtol must be in [0.0, 1.0) or None
+
+    Unsupervised learning (learn_one without y):
+    >>> model_u = OnlineDMD(r=2, w=0.1, initialize=0)
+    >>> for _, row in df.iterrows():
+    ...     model_u.learn_one(row.to_dict())
+    >>> eig_u, _ = np.log(model_u.eig[0]) / dt
+    >>> bool(np.isclose(eig_u.imag, np.pi * freq))
+    True
+
+    Exponential weighting:
+    >>> model_ew = OnlineDMD(r=2, w=0.95, exponential_weighting=True, initialize=0)
+    >>> for (_, x_), (_, y_) in zip(X.iterrows(), Y.iterrows()):
+    ...     model_ew.learn_one(x_.to_dict(), y_.to_dict())
+    >>> bool(np.isfinite(model_ew.eig[0]).all())
+    True
+
+    A_allclose property with eig_rtol:
+    >>> model_ac = OnlineDMD(r=2, w=1.0, eig_rtol=0.1, initialize=0)
+    >>> for (_, x_), (_, y_) in zip(X.iterrows(), Y.iterrows()):
+    ...     model_ac.learn_one(x_.to_dict(), y_.to_dict())
+    >>> isinstance(model_ac.A_allclose, bool)
+    True
+
+    A_allclose returns False when eig_rtol is None:
+    >>> model_no_rtol = OnlineDMD(r=2, w=1.0, initialize=0)
+    >>> for (_, x_), (_, y_) in zip(X.iterrows(), Y.iterrows()):
+    ...     model_no_rtol.learn_one(x_.to_dict(), y_.to_dict())
+    >>> model_no_rtol.A_allclose
+    False
+
+    Predict one:
+    >>> w_pred = model.predict_one({'w1': w1[-2], 'w2': w2[-2]})
+    >>> bool(np.allclose(list(w_pred.values()), [w1[-1], w2[-1]]))
+    True
+
+    Y features must match x features:
+    >>> model_e = OnlineDMD(r=2, w=1.0, initialize=0)
+    >>> model_e.learn_one({'a': 1.0, 'b': 2.0}, {'c': 3.0, 'd': 4.0})
+    Traceback (most recent call last):
+        ...
+    ValueError: y features do not match x features
+
+    Revert before initialization raises RuntimeError:
+    >>> model_rv = OnlineDMD(r=2, w=1.0, initialize=10)
+    >>> model_rv.learn_one({'w1': 1.0, 'w2': 0.0}, {'w1': 0.0, 'w2': 1.0})
+    >>> model_rv.revert({'w1': 1.0, 'w2': 0.0}, {'w1': 0.0, 'w2': 1.0})
+    Traceback (most recent call last):
+        ...
+    RuntimeError: Cannot revert OnlineDMD before initialization...
+
+    _unit_test_skips returns expected set of strings:
+    >>> skips = OnlineDMD()._unit_test_skips()
+    >>> 'check_learn_one' in skips
+    True
+
+    update_many without Y (unsupervised):
+    >>> model_um = OnlineDMD(r=2, w=1.0, initialize=0)
+    >>> model_um.update_many(df)
+    >>> bool(np.isfinite(model_um.eig[0]).all())
+    True
+
+    update_many with Y=None and numpy array:
+    >>> model_um2 = OnlineDMD(r=2, w=1.0, initialize=0)
+    >>> model_um2.update_many(df.values)
+    >>> bool(np.isfinite(model_um2.eig[0]).all())
+    True
+
+    Truncated DMD (r < m): modes property
+    >>> model_tr = OnlineDMD(r=1, w=1.0, initialize=10)
+    >>> for (_, x_), (_, y_) in zip(X.iterrows(), Y.iterrows()):
+    ...     model_tr.learn_one(x_.to_dict(), y_.to_dict())
+    >>> model_tr.modes.shape
+    (2, 1)
+
+    xi property:
+    >>> model.xi.shape
+    (2,)
+
+    transform_one before learning returns zeros:
+    >>> model_tf = OnlineDMD(r=2, w=1.0, initialize=0)
+    >>> all(v == 0.0 for v in model_tf.transform_one({'w1': 1.0, 'w2': 0.0}).values())
+    True
+
+    transform_one after learning projects via modes:
+    >>> result = model.transform_one({'w1': 1.0, 'w2': 0.0})
+    >>> len(result) == 2
+    True
+
+    transform_many projects batch via modes:
+    >>> Xt = model.transform_many(df.iloc[:5])
+    >>> Xt.shape
+    (5, 2)
+
+    forecast method uses _x_last from unsupervised mode:
+    >>> model_fc = OnlineDMD(r=2, w=1.0, initialize=0)
+    >>> for _, row in df.iterrows():
+    ...     model_fc.learn_one(row.to_dict())
+    >>> preds = model_fc.forecast(3)
+    >>> len(preds)
+    3
+
+    forecast when SVD not initialized returns zeros:
+    >>> model_fc0 = OnlineDMD(r=1, w=1.0, initialize=0)
+    >>> model_fc0._x_last = {'w1': 1.0, 'w2': 0.0}
+    >>> model_fc0.forecast(2)
+    [0.0, 0.0]
+
+    update_many rank check ValueError:
+    >>> model_rk = OnlineDMD(r=2, w=1.0, initialize=0)
+    >>> model_rk.learn_many(np.ones((5, 2)), np.ones((5, 2)))
+    Traceback (most recent call last):
+        ...
+    ValueError: Failed rank(X) [1] >= n_modes [2]...
+
     References:
         [^1]: Zhang, H., Clarence Worth Rowley, Deem, E.A. and Cattafesta, L.N.
         (2019). Online Dynamic Mode Decomposition for Time-Varying Systems.
@@ -231,7 +360,9 @@ class OnlineDMD(MiniBatchMultiTargetRegressor, BaseTransformer):
                 # self._modes = self._svd._U @ Phi_comp
                 # This regularization works much better than the above
                 #  if high variance in svs of X
-                self._modes = self._svd._U @ np.diag(1 / self._svd._S) @ Phi_comp
+                self._modes = (
+                    self._svd._U @ np.diag(1 / self._svd._S) @ Phi_comp
+                )
             else:
                 self._modes = Phi_comp
         return self._modes
@@ -249,7 +380,9 @@ class OnlineDMD(MiniBatchMultiTargetRegressor, BaseTransformer):
 
             def objective_function(x: np.ndarray) -> float:
                 return float(
-                    np.linalg.norm(self._Y[:, : self.r].T - Phi @ np.diag(x) @ C, "fro")
+                    np.linalg.norm(
+                        self._Y[:, : self.r].T - Phi @ np.diag(x) @ C, "fro"
+                    )
                     + 0.5 * np.linalg.norm(x, 1)
                 )
 
@@ -319,7 +452,9 @@ class OnlineDMD(MiniBatchMultiTargetRegressor, BaseTransformer):
 
         return x, y
 
-    def _update_A_P(self, X: np.ndarray, Y: np.ndarray, W: float | np.ndarray) -> None:
+    def _update_A_P(
+        self, X: np.ndarray, Y: np.ndarray, W: float | np.ndarray
+    ) -> None:
         Xt = X.T
         AX = self.A.dot(Xt)
         PX = self._P.dot(Xt)
@@ -543,7 +678,9 @@ class OnlineDMD(MiniBatchMultiTargetRegressor, BaseTransformer):
         n = X.shape[0]
         # Exponential weighting factor - older snapshots are weighted less
         if self.exponential_weighting:
-            weights = (np.sqrt(self.w) ** np.arange(n - 1, -1, -1))[:, np.newaxis]
+            weights = (np.sqrt(self.w) ** np.arange(n - 1, -1, -1))[
+                :, np.newaxis
+            ]
         else:
             weights = np.ones((n, 1))
         Xqhat, Yqhat = weights * X, weights * Y
@@ -585,7 +722,12 @@ class OnlineDMD(MiniBatchMultiTargetRegressor, BaseTransformer):
                     _UU = np.eye(self.r)
 
                 # Verify if equivalent to Proctor (2016). They compute U_hat from SVD(Y), we select the first r columns of U
-                self.A = (_U.T[:, : Yqhat.shape[1]] @ Yqhat.T @ _V.T @ np.diag(1 / _S)) @ _UU
+                self.A = (
+                    _U.T[:, : Yqhat.shape[1]]
+                    @ Yqhat.T
+                    @ _V.T
+                    @ np.diag(1 / _S)
+                ) @ _UU
                 self._P = np.linalg.inv(_U.T @ XX @ _U) / self.w
             # Perform exact DMD
             else:
@@ -633,7 +775,9 @@ class OnlineDMD(MiniBatchMultiTargetRegressor, BaseTransformer):
         result = (A @ x_arr).real
         return dict(zip(keys, result))
 
-    def predict_horizon(self, x: dict[Hashable, float] | np.ndarray, horizon: int) -> np.ndarray:
+    def predict_horizon(
+        self, x: dict[Hashable, float] | np.ndarray, horizon: int
+    ) -> np.ndarray:
         """Predicts multiple future values based on the given initial value.
 
         Args:
@@ -701,35 +845,48 @@ class OnlineDMD(MiniBatchMultiTargetRegressor, BaseTransformer):
         return float(np.linalg.norm(Y - Y_hat.T) / np.linalg.norm(Y))
 
     def transform_one(self, x: dict[Hashable, Any]) -> dict[Hashable, Any]:
-        """Transform the given input sample.
+        r"""Reconstruct x via DMD mode subspace: :math:`\hat{x} = \Phi \Phi^T x`.
 
         Args:
             x: The input to transform.
 
         Returns:
-            dict: The transformed input.
+            dict: The reconstructed input in original space.
         """
+        keys = list(x.keys())
         x_arr = np.array(list(x.values()))
-        if not hasattr(self, "A") or (hasattr(self, "_svd") and not hasattr(self._svd, "_U")):
-            return dict(
-                zip(
-                    range(self.r),
-                    np.zeros(self.r),
-                )
-            )
-        return dict(zip(range(self.r), x_arr @ self.modes))
+        if not hasattr(self, "A") or (
+            hasattr(self, "_svd") and not hasattr(self._svd, "_U")
+        ):
+            return dict(zip(keys, np.zeros(len(keys))))
+        M = self.modes
+        x_hat = (M @ (M.T @ x_arr)).real
+        return dict(zip(keys, x_hat))
 
-    def transform_many(self, X: np.ndarray | pd.DataFrame) -> np.ndarray | pd.DataFrame:
-        """Transform the given input sequence.
+    def transform_many(
+        self, X: np.ndarray | pd.DataFrame
+    ) -> np.ndarray | pd.DataFrame:
+        r"""Reconstruct X via DMD mode subspace: :math:`\hat{X} = \Phi \Phi^T X`.
 
         Args:
             X: The input to transform.
 
         Returns:
-            np.ndarray: The transformed input.
+            np.ndarray | pd.DataFrame: The reconstructed input in original space.
         """
+        if not hasattr(self, "A") or (
+            hasattr(self, "_svd") and not hasattr(self._svd, "_U")
+        ):
+            if isinstance(X, pd.DataFrame):
+                return X.copy()
+            return X.copy()
         M = self.modes
-        return X @ M
+        # Φ Φᵀ X  (reconstruction via mode subspace)
+        X_vals = X.values if isinstance(X, pd.DataFrame) else X
+        X_hat = (X_vals @ M @ M.T).real
+        if isinstance(X, pd.DataFrame):
+            return pd.DataFrame(X_hat, index=X.index, columns=X.columns)
+        return X_hat
 
 
 class OnlineDMDwC(OnlineDMD):
@@ -842,6 +999,75 @@ class OnlineDMDwC(OnlineDMD):
     >>> bool(np.allclose(w_pred.T, [w1[1:11], w2[1:11]]))
     True
 
+    predict_one without control falls back to parent:
+    >>> w_pred_nc = model.predict_one({'w1': w1[-2], 'w2': w2[-2]})
+    >>> len(w_pred_nc) == 2
+    True
+
+    predict_horizon without U falls back to parent (known B variant):
+    >>> B_ph = np.array([[1.0], [0.0]])
+    >>> model_ph = OnlineDMDwC(B=B_ph, p=2, q=1, w=0.1, initialize=4)
+    >>> for (_, x_r), (_, y_r), (_, u_r) in zip(
+    ...     X.iterrows(), Y.iterrows(), U.iterrows()
+    ... ):
+    ...     model_ph.learn_one(x_r.to_dict(), y_r.to_dict(), u_r.to_dict())
+    >>> w_pred_nc_h = model_ph.predict_horizon({'w1': 1, 'w2': 0}, 3)
+    >>> w_pred_nc_h.shape
+    (3, 2)
+
+    truncation_error with control:
+    >>> err = model.truncation_error(X.values, Y.values, U.values)
+    >>> bool(np.isfinite(err))
+    True
+
+    truncation_error without U falls back to parent:
+    >>> err_nc = model.truncation_error(X.values, Y.values)
+    >>> bool(np.isfinite(err_nc))
+    True
+
+    learn_many with control:
+    >>> model_lm = OnlineDMDwC(p=2, q=1, w=1.0, initialize=0)
+    >>> model_lm.learn_many(X.values, Y.values, U.values)
+    >>> bool(np.isfinite(model_lm.eig[0]).all())
+    True
+
+    Unsupervised with control (learn_one without y):
+    >>> model_uc = OnlineDMDwC(p=2, q=1, w=1.0, initialize=0)
+    >>> for (_, x_r), (_, u_r) in zip(df.iterrows(), U.iterrows()):
+    ...     model_uc.learn_one(x_r.to_dict(), u=u_r.to_dict())
+    >>> bool(np.isfinite(model_uc.eig[0]).all())
+    True
+
+    Revert with control input (via Rolling):
+    >>> model_rev = Rolling(OnlineDMDwC(p=2, q=1, w=1.0), 10)
+    >>> for (_, x_r), (_, y_r), (_, u_r) in zip(
+    ...     X.iterrows(), Y.iterrows(), U.iterrows()
+    ... ):
+    ...     model_rev.update(x_r.to_dict(), y_r.to_dict(), u_r.to_dict())
+    >>> bool(np.isfinite(model_rev.eig[0]).all())
+    True
+
+    Known B variant:
+    >>> B_known = np.array([[1.0], [0.0]])
+    >>> model_kb = OnlineDMDwC(B=B_known, p=2, q=1, w=1.0, initialize=4)
+    >>> for (_, x_r), (_, y_r), (_, u_r) in zip(
+    ...     X.iterrows(), Y.iterrows(), U.iterrows()
+    ... ):
+    ...     model_kb.learn_one(x_r.to_dict(), y_r.to_dict(), u_r.to_dict())
+    >>> bool(np.isfinite(model_kb.eig[0]).all())
+    True
+
+    modes property:
+    >>> model.modes.shape[0] == 2
+    True
+
+    xi property (requires _x_first set via unsupervised revert):
+    >>> model_xi = Rolling(OnlineDMDwC(p=2, q=1, w=1.0), 10)
+    >>> for (_, x_r), (_, u_r) in zip(df.iterrows(), U.iterrows()):
+    ...     model_xi.update(x_r.to_dict(), u=u_r.to_dict())
+    >>> model_xi.xi.shape
+    (2,)
+
     References:
         [^1]: Zhang, H., Clarence Worth Rowley, Deem, E.A. and Cattafesta, L.N.
         (2019). Online Dynamic Mode Decomposition for Time-Varying Systems.
@@ -946,8 +1172,16 @@ class OnlineDMDwC(OnlineDMD):
         # self.m stores augumented state dimension
         _m = self.m - self.l if not self.known_B else self.m
         if self.r < self.m:
-            A = self._svd._U[:_m, : self.p] @ self.A @ self._svd._U[:_m, : self.p].T
-            B = self._svd._U[:_m, : self.p] @ self.B @ self._svd._U[-self.l :, -self.q :].T
+            A = (
+                self._svd._U[:_m, : self.p]
+                @ self.A
+                @ self._svd._U[:_m, : self.p].T
+            )
+            B = (
+                self._svd._U[:_m, : self.p]
+                @ self.B
+                @ self._svd._U[-self.l :, -self.q :].T
+            )
         else:
             A = self.A
             B = self.B
@@ -1117,7 +1351,7 @@ class OnlineDMDwC(OnlineDMD):
             super()._update_many(X, Y)
         else:
             if self.known_B:
-                Y = Y - self.B @ U
+                Y = Y - U @ self.B.T
             else:
                 X = np.column_stack((X, U))
             if self.n_seen == 0:
@@ -1164,6 +1398,11 @@ class OnlineDMDwC(OnlineDMD):
             Y = np.roll(X, -1)[:-1]
             X = X[:-1]
             U = U[:-1]
+
+        self.m = X.shape[1]
+        self.l = U.shape[1]
+        self._init_update()
+        self.m += 0 if self.known_B else U.shape[1]
 
         if self.known_B and self.B is not None:
             Y = Y - U @ self.B.T

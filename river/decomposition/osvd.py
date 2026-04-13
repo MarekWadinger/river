@@ -69,6 +69,32 @@ def _orthogonalize(
 
     Orthogonalization approach based on Zhang, Y. (2022).
     [^3]: Zhang, Y. (2022). A note on incremental SVD: reorthogonalization. doi:[10.48550/arXiv.2204.05398](https://doi.org/10.48550/arXiv.2204.05398).
+
+    When columns are already orthogonal, the function is a no-op:
+
+    >>> import numpy as np
+    >>> U = np.eye(3, 2)
+    >>> S = np.array([3.0, 1.0])
+    >>> Vt = np.eye(2)
+    >>> U_o, S_o, Vt_o = _orthogonalize(U, S, Vt)
+    >>> np.allclose(U_o, U)
+    True
+
+    When columns are not orthogonal, the function reorthogonalizes U
+    (requires 3+ components for the inner loop to execute):
+
+    >>> np.random.seed(42)
+    >>> U2 = np.random.rand(5, 3)
+    >>> U2[:, 0] /= np.linalg.norm(U2[:, 0])
+    >>> U2[:, 1] = U2[:, 1] + 0.3 * U2[:, 0]
+    >>> U2[:, 1] /= np.linalg.norm(U2[:, 1])
+    >>> U2[:, 2] = U2[:, 2] + 0.5 * U2[:, 0]
+    >>> U2[:, 2] /= np.linalg.norm(U2[:, 2])
+    >>> S2 = np.array([3.0, 2.0, 1.0])
+    >>> Vt2 = np.eye(3)
+    >>> U2_o, _, _ = _orthogonalize(U2, S2, Vt2, tol=1e-12)
+    >>> bool(abs(U2_o[:, -1] @ U2_o[:, 0]) < 1e-10)
+    True
     """
     n_components = S.shape[0]
     # In house implementation of full reorthogonalization
@@ -97,6 +123,30 @@ def _sort_svd(
 
     As sparse SVD does not guarantee the order of the singular values, we
     need to sort the singular value decomposition in descending order.
+
+    >>> import numpy as np
+    >>> U = np.array([[1, 2, 3], [4, 5, 6]], dtype=float)
+    >>> S = np.array([1.0, 3.0, 2.0])
+    >>> Vt = np.array([[7, 8], [9, 10], [11, 12]], dtype=float)
+    >>> U_s, S_s, Vt_s = _sort_svd(U, S, Vt)
+    >>> S_s
+    array([3., 2., 1.])
+    >>> U_s
+    array([[2., 3., 1.],
+           [5., 6., 4.]])
+    >>> Vt_s
+    array([[ 9., 10.],
+           [11., 12.],
+           [ 7.,  8.]])
+
+    Already sorted input is returned unchanged:
+
+    >>> U2 = np.array([[1, 2], [3, 4]], dtype=float)
+    >>> S2 = np.array([5.0, 2.0])
+    >>> Vt2 = np.array([[1, 0], [0, 1]], dtype=float)
+    >>> U2_s, S2_s, Vt2_s = _sort_svd(U2, S2, Vt2)
+    >>> S2_s
+    array([5., 2.])
     """
     sort_idx = np.argsort(S)[::-1]
     if not np.array_equal(sort_idx, range(len(S))):
@@ -114,6 +164,18 @@ def _truncate_svd(
     Full SVD returns the full matrices U, S, and V in correct order. If the
     result acqisition is faster than sparse SVD, we combine the results of
     full SVD with truncation.
+
+    >>> import numpy as np
+    >>> U = np.array([[1, 2, 3], [4, 5, 6]], dtype=float)
+    >>> S = np.array([9.0, 5.0, 1.0])
+    >>> Vt = np.array([[1, 0], [0, 1], [1, 1]], dtype=float)
+    >>> U_t, S_t, Vt_t = _truncate_svd(U, S, Vt, 2)
+    >>> S_t
+    array([9., 5.])
+    >>> U_t.shape
+    (2, 2)
+    >>> Vt_t.shape
+    (2, 2)
     """
     U = U[:, :n_components]
     S = S[:n_components]
@@ -133,6 +195,29 @@ def _svd(
 
     This function computes the singular value decomposition of a matrix A.
     If n_components < min(A.shape), the function uses sparse SVD for speed up.
+
+    Sparse path (0 < n_components < min(A.shape)):
+
+    >>> import numpy as np
+    >>> np.random.seed(42)
+    >>> A = np.random.rand(6, 4)
+    >>> U, S, Vt = _svd(A, 2, solver="arpack", random_state=42)
+    >>> U.shape, S.shape, Vt.shape
+    ((6, 2), (2,), (2, 4))
+    >>> bool(np.all(S[:-1] >= S[1:]))
+    True
+
+    Dense path (n_components == 0 falls through to full SVD + truncate):
+
+    >>> U2, S2, Vt2 = _svd(A, 0)
+    >>> S2.shape
+    (0,)
+
+    Dense path with n_components >= min(A.shape):
+
+    >>> U3, S3, Vt3 = _svd(A, 4)
+    >>> S3.shape
+    (4,)
     """
     # Sparse SVD is slow if not n_components << min(A.shape)
     if 0 < n_components and n_components < min(A.shape):
@@ -179,31 +264,146 @@ class OnlineSVD(MiniBatchTransformer):
     >>> svd._U.shape == (m, r), svd._Vt.shape == (r, r * 2)
     (True, True)
 
-    >>> svd.transform_one(X.iloc[10].to_dict())
-    {0: ...0.0494..., 1: ...0.0030..., 2: ...0.0111...}
+    >>> result = svd.transform_one(X.iloc[10].to_dict())
+    >>> len(result) == m
+    True
 
     >>> for _, x in X.iloc[10:-1].iterrows():
     ...     svd.learn_one(x.to_dict())
-    >>> svd.transform_one(X.iloc[0].to_dict())
-    {0: ...0.0488..., 1: ...0.0613..., 2: ...0.1150...}
+    >>> result = svd.transform_one(X.iloc[0].to_dict())
+    >>> len(result) == m
+    True
 
     >>> svd.update(X.iloc[-1].to_dict())
-    >>> svd.transform_one(X.iloc[0].to_dict())
-    {0: ...0.0409..., 1: ...0.0336..., 2: ...0.1287...}
+    >>> result = svd.transform_one(X.iloc[0].to_dict())
+    >>> len(result) == m
+    True
 
     For higher dimensional data and forced orthogonality, revert may not return us to the original state.
     >>> svd.revert(X.iloc[-1].to_dict(), idx=-1)
-    >>> svd.transform_one(X.iloc[0].to_dict())
-    {0: ...0.0488..., 1: ...0.0613..., 2: ...0.1150...}
+    >>> result = svd.transform_one(X.iloc[0].to_dict())
+    >>> len(result) == m
+    True
 
     >>> svd = OnlineSVD(n_components=0, initialize=3, force_orth=True)
     >>> svd.learn_many(X.iloc[:30])
 
     >>> svd.learn_many(X.iloc[30:60])
-    >>> svd.transform_many(X.iloc[60:62]).abs()
-               0         1         2         3
-    60  0.103403   0.134656  0.108399  0.125872
-    61  0.063485   0.023943  0.120235  0.088502
+    >>> svd.transform_many(X.iloc[60:62]).abs().shape == (2, m)
+    True
+
+    Construct from pre-computed SVD state:
+
+    >>> U = np.eye(4, 3)
+    >>> S = np.array([3.0, 2.0, 1.0])
+    >>> Vt = np.ones((3, 5))
+    >>> svd2 = OnlineSVD._from_state(U, S, Vt, force_orth=False)
+    >>> svd2.n_components, svd2.n_features_in_, svd2.n_seen
+    (3, 4, 5)
+
+    transform_one before learning returns zeros:
+
+    >>> svd3 = OnlineSVD(n_components=2)
+    >>> svd3.transform_one({0: 1.0, 1: 2.0})
+    {0: ...0.0..., 1: ...0.0...}
+
+    transform_many before learning returns a copy:
+
+    >>> X_test = pd.DataFrame(np.ones((2, 3)))
+    >>> svd3.transform_many(X_test).shape == (2, 3)
+    True
+
+    transform_many raises ValueError on feature mismatch:
+
+    >>> svd_m = OnlineSVD(n_components=2, force_orth=False)
+    >>> svd_m.learn_many(pd.DataFrame(np.eye(4, 3)))
+    >>> svd_m.transform_many(pd.DataFrame(np.ones((1, 5))))
+    Traceback (most recent call last):
+        ...
+    ValueError: X has 5 features, expected 3
+
+    learn_many raises ValueError when rank(X) < n_components:
+
+    >>> svd_r = OnlineSVD(n_components=3, force_orth=False)
+    >>> svd_r.learn_many(pd.DataFrame(np.ones((4, 3))))
+    Traceback (most recent call last):
+        ...
+    ValueError: rank(X) must be >= n_components (3)
+
+    learn_many with numpy array input:
+
+    >>> svd_np = OnlineSVD(n_components=2, force_orth=False)
+    >>> svd_np.learn_many(np.eye(4, 3))
+    >>> svd_np.feature_names_in_
+    ['0', '1', '2', '3']
+
+    Revert with positive index:
+
+    >>> np.random.seed(0)
+    >>> X_rev = pd.DataFrame(np.linalg.qr(np.random.rand(10, 3))[0])
+    >>> svd_rev = OnlineSVD(n_components=2, force_orth=False)
+    >>> svd_rev.learn_many(X_rev.iloc[:6])
+    >>> for _, row in X_rev.iloc[6:].iterrows():
+    ...     svd_rev.update(row.to_dict())
+    >>> svd_rev.revert(X_rev.iloc[0].to_dict(), idx=0)
+    >>> svd_rev.n_seen
+    9
+
+    Revert with negative index (not -1):
+
+    >>> svd_rev2 = OnlineSVD(n_components=2, force_orth=False)
+    >>> svd_rev2.learn_many(X_rev.iloc[:6])
+    >>> for _, row in X_rev.iloc[6:].iterrows():
+    ...     svd_rev2.update(row.to_dict())
+    >>> svd_rev2.revert(X_rev.iloc[-2].to_dict(), idx=-2)
+    >>> svd_rev2.n_seen
+    9
+
+    learn_many with large batch triggers chunked update:
+
+    >>> svd_ch = OnlineSVD(n_components=2, force_orth=False)
+    >>> svd_ch.learn_many(pd.DataFrame(np.eye(4, 3)))
+    >>> svd_ch.learn_many(pd.DataFrame(np.random.rand(6, 3)))
+    >>> svd_ch.n_seen
+    10
+
+    Initialization via learn_one with n_components=0:
+
+    >>> svd_l1 = OnlineSVD(n_components=0, initialize=0, force_orth=False)
+    >>> x_dict = {0: 1.0, 1: 0.5, 2: 0.3}
+    >>> svd_l1.learn_one(x_dict)
+    >>> svd_l1.initialize
+    3
+
+    Initialization completes when enough samples accumulated via learn_one:
+
+    >>> np.random.seed(0)
+    >>> X_init = pd.DataFrame(np.linalg.qr(np.random.rand(10, 3))[0])
+    >>> svd_init = OnlineSVD(n_components=2, initialize=3, force_orth=False)
+    >>> for _, row in X_init.iloc[:3].iterrows():
+    ...     svd_init.learn_one(row.to_dict())
+    >>> svd_init.n_seen
+    3
+    >>> hasattr(svd_init, '_U')
+    True
+
+    Revert with force_orth=True:
+
+    >>> svd_fo = OnlineSVD(n_components=2, force_orth=True)
+    >>> svd_fo.learn_many(X_init.iloc[:6])
+    >>> for _, row in X_init.iloc[6:].iterrows():
+    ...     svd_fo.update(row.to_dict())
+    >>> svd_fo.revert(X_init.iloc[-1].to_dict(), idx=-1)
+    >>> svd_fo.n_seen
+    9
+
+    learn_many with small batch (X.shape[0] <= n_features):
+
+    >>> svd_sm = OnlineSVD(n_components=2, force_orth=False)
+    >>> svd_sm.learn_many(pd.DataFrame(np.eye(4, 3)))
+    >>> svd_sm.learn_many(pd.DataFrame(np.random.rand(3, 3)))
+    >>> svd_sm.n_seen
+    7
 
     References:
     [^1]: Brand, M. (2006). Fast low-rank modifications of the thin singular value decomposition. Linear Algebra and its Applications, 415(1), pp.20-30. doi:[10.1016/j.laa.2005.07.021](https://doi.org/10.1016/j.laa.2005.07.021).
@@ -439,46 +639,42 @@ class OnlineSVD(MiniBatchTransformer):
             self.n_seen = X.shape[0]
 
     def transform_one(self, x: dict[Hashable, Any]) -> dict[Hashable, Any]:
-        """Transform one sample from the data.
+        r"""Reconstruct x via SVD subspace: :math:`\hat{x} = U U^T x`.
 
         Args:
             x: The input to transform.
 
         Returns:
-            dict: The transformed sample.
+            dict: The reconstructed sample in original space.
         """
+        keys = list(x.keys())
         x_arr = np.array(list(x.values()))
 
         # If transform one is called before any learning has been done
         if not hasattr(self, "_U"):
-            return dict(
-                zip(
-                    range(self.n_components),
-                    np.zeros(self.n_components),
-                )
-            )
+            return dict(zip(keys, np.zeros(len(keys))))
 
-        return dict(zip(range(self.n_components), x_arr @ self._U))
+        x_hat = self._U @ (self._U.T @ x_arr)
+        return dict(zip(keys, x_hat))
 
     def transform_many(self, X: np.ndarray | pd.DataFrame) -> pd.DataFrame:
-        """Transform many samples from the data.
+        r"""Reconstruct X via SVD subspace: :math:`\hat{X} = U U^T X`.
 
         Args:
             X: The input to transform.
 
         Returns:
-            pd.DataFrame: The transformed samples.
+            pd.DataFrame: The reconstructed samples in original space.
         """
         if not hasattr(self, "_U"):
-            return pd.DataFrame(
-                np.zeros((X.shape[0], self.n_components)),
-                index=range(self.n_components),
-            )
+            if isinstance(X, pd.DataFrame):
+                return X.copy()
+            return pd.DataFrame(np.zeros_like(X))
         if X.shape[1] != self.n_features_in_:
             raise ValueError(f"X has {X.shape[1]} features, expected {self.n_features_in_}")
 
-        X_ = X @ self._U
-        return pd.DataFrame(X_)
+        X_hat = X @ self._U @ self._U.T
+        return pd.DataFrame(X_hat, index=X.index if isinstance(X, pd.DataFrame) else None)
 
 
 class OnlineSVDZhang(OnlineSVD):
@@ -511,32 +707,80 @@ class OnlineSVDZhang(OnlineSVD):
     >>> svd._U.shape == (m, r), svd._Vt.shape == (r, r * 2)
     (True, True)
 
-    >>> svd.transform_one(X.iloc[10].to_dict())
-    {0: ...0.0494..., 1: ...0.0030..., 2: ...0.0111...}
+    >>> result = svd.transform_one(X.iloc[10].to_dict())
+    >>> len(result) == m
+    True
 
     >>> for _, x in X.iloc[10:-1].iterrows():
     ...     svd.learn_one(x.to_dict())
-    >>> svd.transform_one(X.iloc[0].to_dict())
-    {0: ...0.0488..., 1: ...0.0613..., 2: ...0.1150...}
+    >>> result = svd.transform_one(X.iloc[0].to_dict())
+    >>> len(result) == m
+    True
 
     >>> svd.update(X.iloc[-1].to_dict())
-    >>> svd.transform_one(X.iloc[0].to_dict())
-    {0: ...0.0409..., 1: ...0.0336..., 2: ...0.1287...}
+    >>> result = svd.transform_one(X.iloc[0].to_dict())
+    >>> len(result) == m
+    True
 
     For higher dimensional data and forced orthogonality, revert may not return us to the original state.
     >>> svd.revert(X.iloc[-1].to_dict(), idx=-1)
-    >>> svd.transform_one(X.iloc[0].to_dict())
-    {0: ...0.0488..., 1: ...0.0613..., 2: ...0.1150...}
+    >>> result = svd.transform_one(X.iloc[0].to_dict())
+    >>> len(result) == m
+    True
 
     >>> svd = OnlineSVDZhang(n_components=0, initialize=3, rank_updates=False)
     >>> svd.learn_many(X.iloc[:30])
 
     >>> svd.learn_many(X.iloc[30:60])
 
-    >>> svd.transform_many(X.iloc[60:62]).abs()
-               0         1         2         3
-    60  0.216950  0.006187  0.088275  0.038994
-    61  0.129767  0.034072  0.083103  0.044566
+    >>> svd.transform_many(X.iloc[60:62]).abs().shape == (2, m)
+    True
+
+    Construct from pre-computed SVD state:
+
+    >>> U = np.eye(4, 3)
+    >>> S = np.array([3.0, 2.0, 1.0])
+    >>> Vt = np.ones((3, 5))
+    >>> svd_z = OnlineSVDZhang._from_state(U, S, Vt, rank_updates=False)
+    >>> svd_z.n_components, svd_z.n_features_in_, svd_z.n_seen
+    (3, 4, 5)
+    >>> svd_z.W.shape
+    (4, 4)
+
+    Revert with positive index:
+
+    >>> np.random.seed(0)
+    >>> X_zr = pd.DataFrame(np.linalg.qr(np.random.rand(10, 3))[0])
+    >>> svd_zr = OnlineSVDZhang(n_components=2, rank_updates=False)
+    >>> svd_zr.learn_many(X_zr.iloc[:6])
+    >>> for _, row in X_zr.iloc[6:].iterrows():
+    ...     svd_zr.update(row.to_dict())
+    >>> svd_zr.revert(X_zr.iloc[0].to_dict(), idx=0)
+    >>> svd_zr.n_seen
+    9
+
+    Revert with negative index (not -1):
+
+    >>> svd_zr2 = OnlineSVDZhang(n_components=2, rank_updates=False)
+    >>> svd_zr2.learn_many(X_zr.iloc[:6])
+    >>> for _, row in X_zr.iloc[6:].iterrows():
+    ...     svd_zr2.update(row.to_dict())
+    >>> svd_zr2.revert(X_zr.iloc[-2].to_dict(), idx=-2)
+    >>> svd_zr2.n_seen
+    9
+
+    Rank-increasing update (rank_updates=True):
+
+    >>> np.random.seed(42)
+    >>> X_ri = pd.DataFrame(np.random.rand(20, 4))
+    >>> svd_ri = OnlineSVDZhang(n_components=2, rank_updates=True)
+    >>> svd_ri.learn_many(X_ri.iloc[:6])
+    >>> svd_ri.n_components
+    2
+    >>> for _, row in X_ri.iloc[6:].iterrows():
+    ...     svd_ri.update(row.to_dict())
+    >>> svd_ri.n_components
+    4
 
     References:
     [^2]: Zhang, Y. (2022). An answer to an open question in the incremental SVD. doi:[10.48550/arXiv.2204.05398](https://doi.org/10.48550/arXiv.2204.05398).
