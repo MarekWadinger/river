@@ -7,6 +7,8 @@ operations where numpy dispatch overhead dominates.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 
@@ -19,6 +21,18 @@ from river.decomposition._rust_decomp import (
 def _as_complex(arr: np.ndarray) -> np.ndarray:
     """Ensure numpy array (Rust returns complex arrays directly)."""
     return np.asarray(arr)
+
+
+def _build_svd_namespace(inner: object) -> SimpleNamespace | None:
+    """Build a Python ``_svd``-style namespace exposing ``_U``, ``_S``, ``_Vt``.
+
+    Returns ``None`` when the backing OnlineSVDZhang has never been fit
+    (matches Python's ``hasattr(self._svd, "_U")`` being False in that case).
+    """
+    u = inner.svd_u
+    if u is None:
+        return None
+    return SimpleNamespace(_U=u, _S=inner.svd_s, _Vt=inner.svd_vt)
 
 
 class RustRollingDMD:
@@ -128,21 +142,47 @@ class RustRollingDMD:
         """DMDChangeDetector compatibility."""
         return self
 
+    @property
+    def _svd(self) -> SimpleNamespace | None:
+        """Backing OnlineSVDZhang exposing ``_U``, ``_S``, ``_Vt``.
+
+        Mirrors Python ``OnlineDMD._svd``: returns ``None`` until the SVD has
+        been fit (which only happens when ``r < m``).
+        """
+        return _build_svd_namespace(self._inner)
+
+    @property
+    def _Y(self) -> np.ndarray:
+        """Buffer of past ``y`` snapshots in the rolling window, shape ``(n, m)``.
+
+        Mirrors Python ``OnlineDMD._Y`` post-initialization. Reconstructed from
+        the rolling ``(x, y)`` window kept inside the Rust struct.
+        """
+        return np.asarray(self._inner.y_buffer)
+
     def transform_one(self, x: dict | np.ndarray) -> dict | np.ndarray:
-        """Transform a single sample."""
-        result = _as_complex(self._inner.transform_one(x))
+        r"""Reconstruct x via DMD mode subspace: :math:`\hat{x} = \Phi \Phi^T x`.
+
+        Returns an m-dim real vector in the original feature space. Before the
+        model is fitted, returns zeros with the input's shape/keys.
+        """
+        result = np.asarray(self._inner.transform_one(x))
         if isinstance(x, dict):
-            return dict(zip(range(len(result)), result))
+            return dict(zip(x.keys(), result))
         return result
 
     def transform_many(
         self, X: np.ndarray | pd.DataFrame
     ) -> np.ndarray | pd.DataFrame:
-        """Transform multiple samples."""
+        r"""Reconstruct X via DMD mode subspace: :math:`\hat{X} = X \Phi \Phi^T`.
+
+        Returns an ``(n, m)`` real array in the original feature space. Before
+        the model is fitted, returns a copy of the input.
+        """
         if isinstance(X, pd.DataFrame):
-            result = _as_complex(self._inner.transform_many(X.values))
-            return pd.DataFrame(result, index=X.index)
-        return _as_complex(self._inner.transform_many(X))
+            result = np.asarray(self._inner.transform_many(X.values))
+            return pd.DataFrame(result, index=X.index, columns=X.columns)
+        return np.asarray(self._inner.transform_many(X))
 
 
 class RustRollingDMDwC:
@@ -264,6 +304,16 @@ class RustRollingDMDwC:
         """DMDChangeDetector compatibility."""
         return self
 
+    @property
+    def _svd(self) -> SimpleNamespace | None:
+        """Backing OnlineSVDZhang exposing ``_U``, ``_S``, ``_Vt``."""
+        return _build_svd_namespace(self._inner)
+
+    @property
+    def _Y(self) -> np.ndarray:
+        """Buffer of past ``y`` snapshots in the rolling window, shape ``(n, m)``."""
+        return np.asarray(self._inner.y_buffer)
+
     def predict_one(
         self,
         x: dict | np.ndarray,
@@ -293,8 +343,25 @@ class RustRollingDMDwC:
         return np.asarray(self._inner.predict_horizon(x, horizon, U))
 
     def transform_one(self, x: dict | np.ndarray) -> dict | np.ndarray:
-        """Transform a single sample."""
-        result = _as_complex(self._inner.transform_one(x))
+        r"""Reconstruct x via DMD mode subspace: :math:`\hat{x} = \Phi \Phi^T x`.
+
+        Returns an m-dim real vector in the state space. Before fitting,
+        returns zeros with the input's shape/keys.
+        """
+        result = np.asarray(self._inner.transform_one(x))
         if isinstance(x, dict):
-            return dict(zip(range(len(result)), result))
+            return dict(zip(x.keys(), result))
         return result
+
+    def transform_many(
+        self, X: np.ndarray | pd.DataFrame
+    ) -> np.ndarray | pd.DataFrame:
+        r"""Reconstruct X via DMD mode subspace: :math:`\hat{X} = X \Phi \Phi^T`.
+
+        Returns an ``(n, m)`` real array in the state space. Before fitting,
+        returns a copy of the input.
+        """
+        if isinstance(X, pd.DataFrame):
+            result = np.asarray(self._inner.transform_many(X.values))
+            return pd.DataFrame(result, index=X.index, columns=X.columns)
+        return np.asarray(self._inner.transform_many(X))

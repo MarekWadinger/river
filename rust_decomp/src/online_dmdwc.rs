@@ -9,7 +9,7 @@ use crate::linalg;
 use crate::online_dmd::OnlineDmd;
 use crate::online_svd::OnlineSvdZhang;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize)]
 pub struct OnlineDmdwC {
     pub inner: OnlineDmd,
     pub p_trunc: usize, // state truncation
@@ -440,6 +440,72 @@ impl OnlineDmdwC {
             }
         }
         mat.rows(1, horizon).clone_owned()
+    }
+
+    /// Real orthonormal basis Q (m_state × r) spanning DMDwC modes.
+    /// Realified via SVD of [Re(Φ) | Im(Φ)] (same trick as `OnlineDmd::q_basis`).
+    pub fn q_basis(&self) -> DMatrix<f64> {
+        let phi = self.modes();
+        let m_dim = phi.nrows();
+        let r = phi.ncols();
+        let mut stacked = DMatrix::<f64>::zeros(m_dim, 2 * r);
+        for j in 0..r {
+            for i in 0..m_dim {
+                stacked[(i, j)] = phi[(i, j)].re;
+                stacked[(i, j + r)] = phi[(i, j)].im;
+            }
+        }
+        let (u, _s, _vt) = crate::linalg::svd_full(&stacked);
+        let r_keep = r.min(u.ncols());
+        u.columns(0, r_keep).clone_owned()
+    }
+
+    /// Real symmetric projector P = Q Qᵀ (m × m).
+    /// Computed each call (no cache here — the inner cache only covers modes).
+    pub fn projector(&self) -> DMatrix<f64> {
+        let q = self.q_basis();
+        let qt = q.transpose();
+        crate::linalg::matmul(&q, &qt)
+    }
+
+    /// Reconstruct one sample by orthonormal projection `P x` (real).
+    pub fn transform(&self, x: &[f64]) -> Vec<f64> {
+        if !self.inner.is_initialized() {
+            return vec![0.0; x.len()];
+        }
+        let p = self.projector();
+        let m_dim = p.nrows();
+        let m_in = x.len().min(m_dim);
+        let mut z = vec![0.0f64; m_dim];
+        for i in 0..m_dim {
+            let mut acc = 0.0f64;
+            for k in 0..m_in {
+                acc += p[(i, k)] * x[k];
+            }
+            z[i] = acc;
+        }
+        z
+    }
+
+    /// Reconstruct a batch by orthonormal projection `X P` (real).
+    pub fn transform_many(&self, x: &DMatrix<f64>) -> DMatrix<f64> {
+        if !self.inner.is_initialized() {
+            return x.clone();
+        }
+        let p = self.projector();
+        let m_dim = p.nrows();
+        let m_in = x.ncols().min(m_dim);
+        let x_in = if m_in == x.ncols() {
+            x.clone()
+        } else {
+            x.columns(0, m_in).clone_owned()
+        };
+        let p_in = if m_in == m_dim {
+            p
+        } else {
+            p.rows(0, m_in).clone_owned()
+        };
+        crate::linalg::matmul(&x_in, &p_in)
     }
 }
 

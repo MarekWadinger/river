@@ -1,6 +1,8 @@
 /// Online Dynamic Mode Decomposition (DMD).
 ///
 /// Port of `vendor/river/river/decomposition/odmd.py` (OnlineDMD).
+use std::sync::Mutex;
+
 use nalgebra::{DMatrix, DVector};
 use num_complex::Complex64;
 use serde::{Deserialize, Serialize};
@@ -15,7 +17,7 @@ pub enum SvdModify {
     Revert,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize)]
 pub struct OnlineDmd {
     pub r: usize,
     pub w: f64,
@@ -47,6 +49,49 @@ pub struct OnlineDmd {
     // Track if first update has been done
     pub inited: bool,
     pub p_inited: bool,
+
+    // Lazy caches invalidated whenever `a` changes. Not persisted across pickle.
+    // Mutex (not RefCell) so the parent #[pyclass] remains `Sync`.
+    #[serde(skip)]
+    cached_modes: Mutex<Option<DMatrix<Complex64>>>,
+    #[serde(skip)]
+    cached_q: Mutex<Option<DMatrix<f64>>>,
+    /// Pre-computed orthogonal projector ``P = Q Qᵀ`` (m × m, real symmetric).
+    /// Used by `transform_many`/`transform_one` so reconstruction is a single
+    /// dgemm dispatch with no temporary allocations.
+    #[serde(skip)]
+    cached_proj: Mutex<Option<DMatrix<f64>>>,
+}
+
+// Serde and pyo3 both want a Clone for the inner state, but Mutex<T> is not
+// Clone. Implement Clone manually so the pyclass derive(Clone) on the wrapper
+// keeps working and pickle round-trips reset the caches.
+impl Clone for OnlineDmd {
+    fn clone(&self) -> Self {
+        Self {
+            r: self.r,
+            w: self.w,
+            initialize: self.initialize,
+            exponential_weighting: self.exponential_weighting,
+            eig_rtol: self.eig_rtol,
+            m: self.m,
+            n_seen: self.n_seen,
+            a: self.a.clone(),
+            p: self.p.clone(),
+            svd: self.svd.clone(),
+            x_init: self.x_init.clone(),
+            y_init: self.y_init.clone(),
+            x_last: self.x_last.clone(),
+            x_first: self.x_first.clone(),
+            a_last: self.a_last.clone(),
+            a_allclose_cached: self.a_allclose_cached,
+            inited: self.inited,
+            p_inited: self.p_inited,
+            cached_modes: Mutex::new(None),
+            cached_q: Mutex::new(None),
+            cached_proj: Mutex::new(None),
+        }
+    }
 }
 
 impl OnlineDmd {
@@ -82,7 +127,33 @@ impl OnlineDmd {
             a_allclose_cached: false,
             inited: false,
             p_inited: false,
+            cached_modes: Mutex::new(None),
+            cached_q: Mutex::new(None),
+            cached_proj: Mutex::new(None),
         }
+    }
+
+    /// Mark cached eigendecomposition / projector as stale.
+    /// Call after any mutation of `self.a` (or backing SVD basis).
+    fn invalidate_cache(&mut self) {
+        *self.cached_modes.lock().unwrap() = None;
+        *self.cached_q.lock().unwrap() = None;
+        *self.cached_proj.lock().unwrap() = None;
+    }
+
+    /// Cached real symmetric projector P = Q Qᵀ (m × m).
+    /// Built lazily from `q_basis()`. Used by `transform`/`transform_many`
+    /// so each call is a single BLAS dgemm with no intermediate allocations.
+    fn projector(&self) -> DMatrix<f64> {
+        let mut guard = self.cached_proj.lock().unwrap();
+        if let Some(ref p) = *guard {
+            return p.clone();
+        }
+        let q = self.q_basis();
+        let qt = q.transpose();
+        let p = linalg::matmul(&q, &qt);
+        *guard = Some(p.clone());
+        p
     }
 
     fn init_update(&mut self) {
@@ -193,6 +264,7 @@ impl OnlineDmd {
 
     /// Update with a single (x, y) pair. y=None means unsupervised.
     pub fn update(&mut self, x: &[f64], y: Option<&[f64]>) {
+        self.invalidate_cache();
         let m = x.len();
 
         // Handle unsupervised mode
@@ -258,6 +330,7 @@ impl OnlineDmd {
 
     /// Revert a (x, y) pair.
     pub fn revert(&mut self, x: &[f64], y: Option<&[f64]>) {
+        self.invalidate_cache();
         let (x_use, y_use) = if let Some(y_data) = y {
             (x.to_vec(), y_data.to_vec())
         } else {
@@ -293,6 +366,7 @@ impl OnlineDmd {
 
     /// Batch initialization.
     pub fn learn_many(&mut self, x: &DMatrix<f64>, y: Option<&DMatrix<f64>>) {
+        self.invalidate_cache();
         let (x_data, y_data) = if let Some(y_mat) = y {
             (x.clone(), y_mat.clone())
         } else {
@@ -427,8 +501,19 @@ impl OnlineDmd {
         linalg::eig_complex(&self.a)
     }
 
-    /// Compute DMD modes.
+    /// Compute DMD modes (lifted into m-space if `r < m` and SVD is fit).
+    /// Cached until the next `update`/`revert`/`learn_many`.
     pub fn modes(&self) -> DMatrix<Complex64> {
+        let mut guard = self.cached_modes.lock().unwrap();
+        if let Some(ref m) = *guard {
+            return m.clone();
+        }
+        let result = self.compute_modes();
+        *guard = Some(result.clone());
+        result
+    }
+
+    fn compute_modes(&self) -> DMatrix<Complex64> {
         let (_, phi) = self.eig();
         if self.r < self.m {
             if let Some(ref svd) = self.svd {
@@ -445,6 +530,41 @@ impl OnlineDmd {
         } else {
             phi
         }
+    }
+
+    /// Real orthonormal basis Q (m × r) spanning the DMD mode column space.
+    /// Used by `transform_*` so reconstruction `Q Qᵀ x` runs in real arithmetic
+    /// and is invariant to eigenvector phase/scale (a true projector, unlike
+    /// the non-orthonormal modes Φ themselves — see L1 known issue).
+    /// Cached until the next mutation.
+    pub fn q_basis(&self) -> DMatrix<f64> {
+        let mut guard = self.cached_q.lock().unwrap();
+        if let Some(ref q) = *guard {
+            return q.clone();
+        }
+        let q = self.compute_q_basis();
+        *guard = Some(q.clone());
+        q
+    }
+
+    fn compute_q_basis(&self) -> DMatrix<f64> {
+        let phi = self.modes();
+        let m_dim = phi.nrows();
+        let r = phi.ncols();
+        // Stack [Re(Φ) | Im(Φ)] (m × 2r real). Conjugate-pair eigenvectors
+        // span the same r-dim real subspace; the SVD picks a real basis for it.
+        let mut stacked = DMatrix::<f64>::zeros(m_dim, 2 * r);
+        for j in 0..r {
+            for i in 0..m_dim {
+                stacked[(i, j)] = phi[(i, j)].re;
+                stacked[(i, j + r)] = phi[(i, j)].im;
+            }
+        }
+        // Thin orthonormal basis via SVD; first r left singular vectors span
+        // the column space (drops the redundant imaginary copies).
+        let (u, _s, _vt) = linalg::svd_full(&stacked);
+        let r_keep = r.min(u.ncols());
+        u.columns(0, r_keep).clone_owned()
     }
 
     /// Check if A has converged.
@@ -470,17 +590,67 @@ impl OnlineDmd {
         }
     }
 
-    /// Transform: x @ modes
-    pub fn transform(&self, x: &[f64]) -> Vec<Complex64> {
-        let modes = self.modes();
-        let n = modes.ncols();
-        let mut result = vec![Complex64::new(0.0, 0.0); n];
-        for j in 0..n {
-            for i in 0..x.len().min(modes.nrows()) {
-                result[j] += Complex64::new(x[i], 0.0) * modes[(i, j)];
+    /// Whether the DMD model is fitted (A exists and any backing SVD has _U).
+    /// Mirrors Python check:
+    ///     not hasattr(self, "A") or (hasattr(self, "_svd") and not hasattr(self._svd, "_U"))
+    /// Python creates `_svd` eagerly whenever `r != 0`, even if `r >= m`, so
+    /// models created with an explicit rank report as uninitialized for
+    /// `transform_*` until the SVD is fit (which requires `r < m`).
+    pub fn is_initialized(&self) -> bool {
+        if !self.inited {
+            return false;
+        }
+        if let Some(ref svd) = self.svd {
+            if !svd.is_initialized() {
+                return false;
             }
         }
-        result
+        true
+    }
+
+    /// Reconstruct one sample by orthonormal projection: `P x` where `P = Q Qᵀ`.
+    /// Returns an m-dim real vector. Before fitting, returns zeros.
+    pub fn transform(&self, x: &[f64]) -> Vec<f64> {
+        if !self.is_initialized() {
+            return vec![0.0; x.len()];
+        }
+        let p = self.projector();
+        let m_dim = p.nrows();
+        let m_in = x.len().min(m_dim);
+        let mut z = vec![0.0f64; m_dim];
+        for i in 0..m_dim {
+            let mut acc = 0.0f64;
+            for k in 0..m_in {
+                acc += p[(i, k)] * x[k];
+            }
+            z[i] = acc;
+        }
+        z
+    }
+
+    /// Reconstruct a batch by orthonormal projection: `X P` where `P = Q Qᵀ`.
+    /// Output shape `(n, m)`. Single BLAS dgemm dispatch (one allocation).
+    /// Before fitting, returns `x.clone()`.
+    pub fn transform_many(&self, x: &DMatrix<f64>) -> DMatrix<f64> {
+        if !self.is_initialized() {
+            return x.clone();
+        }
+        let p = self.projector();
+        let m_dim = p.nrows();
+        let m_in = x.ncols().min(m_dim);
+        let x_in = if m_in == x.ncols() {
+            x.clone()
+        } else {
+            x.columns(0, m_in).clone_owned()
+        };
+        // P is symmetric, so X P or X Pᵀ are equivalent; use X P.
+        // Slice P rows to match input width when m_in < m_dim (pad output cols).
+        let p_in = if m_in == m_dim {
+            p
+        } else {
+            p.rows(0, m_in).clone_owned()
+        };
+        linalg::matmul(&x_in, &p_in)
     }
 
     /// Get the full A matrix in original space.

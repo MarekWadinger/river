@@ -164,6 +164,8 @@ include = [
     "river/stream/*.zip",
     "Cargo.toml",
     "rust_src/**/*",
+    "rust_decomp/Cargo.toml",
+    "rust_decomp/src/**/*",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -177,6 +179,8 @@ include = [
     "river/stream/*.zip",
     "Cargo.toml",
     "rust_src/**/*",
+    "rust_decomp/Cargo.toml",
+    "rust_decomp/src/**/*",
 ]
 
 [tool.pytest.ini_options]

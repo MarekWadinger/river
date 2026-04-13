@@ -2,7 +2,7 @@
 use std::collections::VecDeque;
 
 use bincode::{deserialize, serialize};
-use numpy::PyArray2;
+use numpy::PyArray1;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -195,6 +195,62 @@ impl RustRollingDMDwC {
         self.window_size
     }
 
+    // ---- SVD accessors (matches Python OnlineDMDwC._svd._U/_S/_Vt) ----
+
+    #[getter]
+    fn svd_u<'py>(&self, py: Python<'py>) -> PyResult<Option<PyObject>> {
+        if let Some(ref svd) = self.dmd.inner.svd {
+            if svd.is_initialized() {
+                return Ok(Some(dmatrix_to_numpy(py, &svd.u).into_any().unbind()));
+            }
+        }
+        Ok(None)
+    }
+
+    #[getter]
+    fn svd_s<'py>(&self, py: Python<'py>) -> PyResult<Option<PyObject>> {
+        if let Some(ref svd) = self.dmd.inner.svd {
+            if svd.is_initialized() {
+                let arr = PyArray1::from_vec(py, svd.s.iter().copied().collect());
+                return Ok(Some(arr.into_any().unbind()));
+            }
+        }
+        Ok(None)
+    }
+
+    #[getter]
+    fn svd_vt<'py>(&self, py: Python<'py>) -> PyResult<Option<PyObject>> {
+        if let Some(ref svd) = self.dmd.inner.svd {
+            if svd.is_initialized() {
+                return Ok(Some(dmatrix_to_numpy(py, &svd.vt).into_any().unbind()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Y snapshot buffer (n, m) reconstructed from the rolling window.
+    #[getter]
+    fn y_buffer<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+        let m = self.dmd.inner.m;
+        let ys: Vec<&Vec<f64>> = self
+            .window
+            .iter()
+            .filter_map(|(_x, y, _u)| y.as_ref())
+            .collect();
+        let n = ys.len();
+        if n == 0 {
+            let arr = numpy::PyArray2::<f64>::zeros(py, [0, m.max(1)], false);
+            return Ok(arr.into_any().unbind());
+        }
+        let mut mat = nalgebra::DMatrix::<f64>::zeros(n, m);
+        for (i, y) in ys.iter().enumerate() {
+            for (j, &v) in y.iter().enumerate().take(m) {
+                mat[(i, j)] = v;
+            }
+        }
+        Ok(dmatrix_to_numpy(py, &mat).into_any().unbind())
+    }
+
     // ---- Predict ----
 
     fn predict_one<'py>(
@@ -231,17 +287,19 @@ impl RustRollingDMDwC {
         x: Bound<'_, pyo3::PyAny>,
     ) -> PyResult<PyObject> {
         let x_vec = extract_f64_vec(py, &x)?;
-        let modes = self.dmd.modes();
-        let n = modes.ncols();
-        let mut data: Vec<num_complex::Complex64> = Vec::with_capacity(n);
-        for j in 0..n {
-            let mut sum = num_complex::Complex64::new(0.0, 0.0);
-            for i in 0..x_vec.len().min(modes.nrows()) {
-                sum += num_complex::Complex64::new(x_vec[i], 0.0) * modes[(i, j)];
-            }
-            data.push(sum);
-        }
-        let arr = numpy::PyArray1::from_vec(py, data);
+        let result = self.dmd.transform(&x_vec);
+        let arr = PyArray1::from_vec(py, result);
+        Ok(arr.into_any().unbind())
+    }
+
+    fn transform_many<'py>(
+        &self,
+        py: Python<'py>,
+        x: Bound<'_, pyo3::PyAny>,
+    ) -> PyResult<PyObject> {
+        let x_mat = extract_2d_array(&x)?;
+        let result = self.dmd.transform_many(&x_mat);
+        let arr = dmatrix_to_numpy(py, &result);
         Ok(arr.into_any().unbind())
     }
 

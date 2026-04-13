@@ -1,0 +1,14 @@
+include Cargo.toml
+include Cargo.lock
+recursive-include rust_src *.rs
+recursive-include rust_decomp/src *.rs
+include rust_decomp/Cargo.toml
+include rust_decomp/Cargo.lock
+recursive-include river *.pyx *.pxd *.cpp
+recursive-include river/datasets *.csv *.gz *.zip
+recursive-include river/stream *.zip
+prune rust_decomp/target
+prune rust_src/target
+global-exclude __pycache__
+global-exclude *.pyc
+global-exclude *.so

@@ -74,6 +74,11 @@ impl OnlineSvdZhang {
         }
     }
 
+    /// Whether SVD has been fitted (equivalent to hasattr(self, "_U")).
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
     /// Initialize on first data pass.
     fn init_first_pass(&mut self, nfeatures: usize) {
         self.m = nfeatures;
