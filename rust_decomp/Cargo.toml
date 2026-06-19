@@ -28,6 +28,9 @@ blas-src = { version = "0.10", features = ["accelerate"] }
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 lapack-src = { version = "0.10", features = ["intel-mkl"] }
 blas-src = { version = "0.10", features = ["intel-mkl"] }
+# Link MKL statically (downloaded prebuilt) so the .pyd/.so has no runtime DLL
+# dependency — otherwise Windows fails import with "DLL load failed".
+intel-mkl-src = { version = "0.8.1", default-features = false, features = ["mkl-static-lp64-seq", "download"] }
 
 [profile.release]
 opt-level = 3
