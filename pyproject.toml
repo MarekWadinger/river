@@ -142,8 +142,8 @@ optional = true
 
 
 
-[tool.setuptools]
-packages = ["river"]
+[tool.setuptools.packages.find]
+include = ["river*"]
 
 [tool.uv]
 default-groups = [
